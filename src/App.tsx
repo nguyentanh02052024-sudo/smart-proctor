@@ -9,6 +9,11 @@ import Auth from "./pages/Auth";
 import Dashboard from "./pages/Dashboard";
 import CreateExam from "./pages/CreateExam";
 import TakeExam from "./pages/TakeExam";
+import JoinExam from "./pages/JoinExam";
+import ExamSubmissions from "./pages/ExamSubmissions";
+import SubmissionDetail from "./pages/SubmissionDetail";
+import ForgotPassword from "./pages/ForgotPassword";
+import ResetPassword from "./pages/ResetPassword";
 import NotFound from "./pages/NotFound";
 import { Loader2 } from "lucide-react";
 
@@ -61,6 +66,8 @@ const AppRoutes = () => (
         </PublicRoute>
       }
     />
+    <Route path="/forgot-password" element={<ForgotPassword />} />
+    <Route path="/reset-password" element={<ResetPassword />} />
     <Route
       path="/dashboard"
       element={
@@ -78,10 +85,34 @@ const AppRoutes = () => (
       }
     />
     <Route
+      path="/exam/join"
+      element={
+        <ProtectedRoute>
+          <JoinExam />
+        </ProtectedRoute>
+      }
+    />
+    <Route
       path="/exam/:id/take"
       element={
         <ProtectedRoute>
           <TakeExam />
+        </ProtectedRoute>
+      }
+    />
+    <Route
+      path="/exam/:id/submissions"
+      element={
+        <ProtectedRoute>
+          <ExamSubmissions />
+        </ProtectedRoute>
+      }
+    />
+    <Route
+      path="/exam/:id/submission/:submissionId"
+      element={
+        <ProtectedRoute>
+          <SubmissionDetail />
         </ProtectedRoute>
       }
     />

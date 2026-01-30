@@ -6,6 +6,7 @@ export interface User {
   full_name: string;
   role: UserRole;
   avatar_url?: string;
+  phone_number?: string;
   created_at: string;
 }
 
@@ -21,7 +22,9 @@ export interface Exam {
   require_camera: boolean;
   auto_submit_on_violation: boolean;
   is_published: boolean;
+  access_key?: string;
   created_at: string;
+  updated_at?: string;
 }
 
 export interface Question {
@@ -49,6 +52,9 @@ export interface ExamAttempt {
   started_at: string;
   submitted_at?: string;
   score?: number;
+  total_points?: number;
+  max_points?: number;
+  graded_at?: string;
   is_flagged: boolean;
   flag_reason?: string;
   is_cancelled: boolean;
@@ -82,4 +88,13 @@ export interface AttemptWithDetails extends ExamAttempt {
   student: User;
   violations: ViolationLog[];
   answers: Answer[];
+}
+
+export interface ExamResult {
+  attempt: ExamAttempt;
+  exam: Exam;
+  answers: (Answer & { question: Question })[];
+  totalScore: number;
+  maxScore: number;
+  percentage: number;
 }
