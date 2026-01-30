@@ -8,16 +8,25 @@ import { Switch } from '@/components/ui/switch';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { 
   Plus, 
-  Trash2, 
-  GripVertical, 
-  ImagePlus,
   Save,
   Eye,
-  ArrowLeft
+  ArrowLeft,
+  Loader2,
+  Share2
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { QuestionEditor } from './QuestionEditor';
+import { useCreateExam, usePublishExam } from '@/hooks/useExams';
 import type { Question, QuestionOption } from '@/types/exam';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { Badge } from '@/components/ui/badge';
+import { Copy } from 'lucide-react';
 
 interface ExamFormData {
   title: string;
@@ -30,6 +39,9 @@ interface ExamFormData {
 
 export function ExamForm() {
   const navigate = useNavigate();
+  const createExam = useCreateExam();
+  const publishExam = usePublishExam();
+  
   const [examData, setExamData] = useState<ExamFormData>({
     title: '',
     description: '',
@@ -55,6 +67,9 @@ export function ExamForm() {
       order_index: 0,
     },
   ]);
+
+  const [createdExam, setCreatedExam] = useState<any>(null);
+  const [showShareDialog, setShowShareDialog] = useState(false);
 
   const addQuestion = () => {
     const newQuestion: Partial<Question> = {
@@ -88,13 +103,53 @@ export function ExamForm() {
     setQuestions(newQuestions);
   };
 
-  const handleSave = () => {
+  const validateForm = () => {
     if (!examData.title.trim()) {
       toast.error('Vui lòng nhập tiêu đề bài kiểm tra');
-      return;
+      return false;
     }
-    // TODO: Save to database
-    toast.success('Đã lưu bài kiểm tra!');
+
+    for (let i = 0; i < questions.length; i++) {
+      const q = questions[i];
+      if (!q.content?.trim()) {
+        toast.error(`Câu hỏi ${i + 1} chưa có nội dung`);
+        return false;
+      }
+      if (q.type !== 'essay' && (!q.correct_answers || q.correct_answers.length === 0)) {
+        toast.error(`Câu hỏi ${i + 1} chưa chọn đáp án đúng`);
+        return false;
+      }
+    }
+
+    return true;
+  };
+
+  const handleSave = async (publish: boolean = false) => {
+    if (!validateForm()) return;
+
+    try {
+      const exam = await createExam.mutateAsync({
+        ...examData,
+        questions,
+      });
+
+      setCreatedExam(exam);
+
+      if (publish) {
+        await publishExam.mutateAsync({ examId: exam.id, isPublished: true });
+        setShowShareDialog(true);
+      } else {
+        toast.success('Đã lưu bài kiểm tra!');
+        navigate('/dashboard');
+      }
+    } catch (error) {
+      console.error('Save failed:', error);
+    }
+  };
+
+  const copyToClipboard = (text: string) => {
+    navigator.clipboard.writeText(text);
+    toast.success('Đã sao chép!');
   };
 
   return (
@@ -111,13 +166,30 @@ export function ExamForm() {
           </div>
         </div>
         <div className="flex gap-2">
-          <Button variant="outline" className="gap-2">
-            <Eye className="w-4 h-4" />
-            Xem trước
+          <Button 
+            variant="outline" 
+            onClick={() => handleSave(false)} 
+            disabled={createExam.isPending}
+            className="gap-2"
+          >
+            {createExam.isPending ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Save className="w-4 h-4" />
+            )}
+            Lưu nháp
           </Button>
-          <Button onClick={handleSave} className="gap-2">
-            <Save className="w-4 h-4" />
-            Lưu bài kiểm tra
+          <Button 
+            onClick={() => handleSave(true)} 
+            disabled={createExam.isPending}
+            className="gap-2"
+          >
+            {createExam.isPending ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Share2 className="w-4 h-4" />
+            )}
+            Lưu & Xuất bản
           </Button>
         </div>
       </div>
@@ -132,7 +204,7 @@ export function ExamForm() {
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="space-y-2">
-                <Label htmlFor="title">Tiêu đề</Label>
+                <Label htmlFor="title">Tiêu đề *</Label>
                 <Input
                   id="title"
                   placeholder="VD: Kiểm tra Toán học - Chương 1"
@@ -224,6 +296,65 @@ export function ExamForm() {
           ))}
         </div>
       </div>
+
+      {/* Share Dialog */}
+      <Dialog open={showShareDialog} onOpenChange={setShowShareDialog}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>🎉 Bài kiểm tra đã sẵn sàng!</DialogTitle>
+            <DialogDescription>
+              Chia sẻ mã hoặc link sau cho học sinh để tham gia
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Mã bài kiểm tra</label>
+              <div className="flex gap-2">
+                <Input 
+                  value={createdExam?.access_key || ''} 
+                  readOnly 
+                  className="font-mono text-lg tracking-widest text-center"
+                />
+                <Button 
+                  variant="outline" 
+                  size="icon"
+                  onClick={() => copyToClipboard(createdExam?.access_key)}
+                >
+                  <Copy className="w-4 h-4" />
+                </Button>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Link chia sẻ</label>
+              <div className="flex gap-2">
+                <Input 
+                  value={`${window.location.origin}/exam/join?key=${createdExam?.access_key}`} 
+                  readOnly 
+                  className="text-sm"
+                />
+                <Button 
+                  variant="outline" 
+                  size="icon"
+                  onClick={() => copyToClipboard(`${window.location.origin}/exam/join?key=${createdExam?.access_key}`)}
+                >
+                  <Copy className="w-4 h-4" />
+                </Button>
+              </div>
+            </div>
+
+            <Button 
+              onClick={() => {
+                setShowShareDialog(false);
+                navigate('/dashboard');
+              }} 
+              className="w-full"
+            >
+              Quay về Dashboard
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

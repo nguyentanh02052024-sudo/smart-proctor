@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
@@ -23,55 +24,14 @@ import {
   ChevronLeft, 
   ChevronRight,
   Send,
-  Eye
+  Loader2,
+  CheckCircle
 } from 'lucide-react';
 import { toast } from 'sonner';
-import type { Question } from '@/types/exam';
-
-// Mock exam data
-const mockExam = {
-  id: '1',
-  title: 'Kiểm tra Toán học - Chương 1',
-  duration_minutes: 45,
-  max_violations: 3,
-  require_camera: true,
-  questions: [
-    {
-      id: '1',
-      type: 'multiple_choice_single' as const,
-      content: 'Phương trình x² - 5x + 6 = 0 có nghiệm là:',
-      points: 2,
-      options: [
-        { id: 'a', text: 'x = 2 và x = 3' },
-        { id: 'b', text: 'x = -2 và x = -3' },
-        { id: 'c', text: 'x = 1 và x = 6' },
-        { id: 'd', text: 'x = -1 và x = -6' },
-      ],
-      order_index: 0,
-    },
-    {
-      id: '2',
-      type: 'multiple_choice_multiple' as const,
-      content: 'Chọn các số nguyên tố trong các số sau:',
-      points: 3,
-      options: [
-        { id: 'a', text: '2' },
-        { id: 'b', text: '3' },
-        { id: 'c', text: '4' },
-        { id: 'd', text: '5' },
-        { id: 'e', text: '6' },
-      ],
-      order_index: 1,
-    },
-    {
-      id: '3',
-      type: 'essay' as const,
-      content: 'Giải thích định lý Pythagore và nêu một ví dụ ứng dụng trong thực tế.',
-      points: 5,
-      order_index: 2,
-    },
-  ],
-};
+import { useExam } from '@/hooks/useExams';
+import { useStartAttempt, useSaveAnswer, useLogViolation, useSubmitExam } from '@/hooks/useExamAttempt';
+import { supabase } from '@/integrations/supabase/client';
+import type { QuestionOption } from '@/types/exam';
 
 interface Answer {
   questionId: string;
@@ -80,19 +40,54 @@ interface Answer {
 }
 
 export function ExamTaking() {
+  const { id: examId } = useParams<{ id: string }>();
+  const [searchParams] = useSearchParams();
+  const navigate = useNavigate();
+  const attemptIdParam = searchParams.get('attempt');
+  
+  const [attemptId, setAttemptId] = useState<string | null>(attemptIdParam);
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
   const [answers, setAnswers] = useState<Answer[]>([]);
-  const [timeLeft, setTimeLeft] = useState(mockExam.duration_minutes * 60);
+  const [timeLeft, setTimeLeft] = useState(0);
   const [violations, setViolations] = useState(0);
   const [showViolationAlert, setShowViolationAlert] = useState(false);
   const [violationMessage, setViolationMessage] = useState('');
   const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
   const [cameraError, setCameraError] = useState(false);
+  const [isSubmitted, setIsSubmitted] = useState(false);
+  const [examResult, setExamResult] = useState<any>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  
+  const { data: exam, isLoading: examLoading } = useExam(examId || '');
+  const startAttempt = useStartAttempt();
+  const saveAnswer = useSaveAnswer();
+  const logViolation = useLogViolation();
+  const submitExam = useSubmitExam();
 
-  const currentQuestion = mockExam.questions[currentQuestionIndex];
-  const totalQuestions = mockExam.questions.length;
-  const progress = ((currentQuestionIndex + 1) / totalQuestions) * 100;
+  const questions = exam?.questions || [];
+  const currentQuestion = questions[currentQuestionIndex];
+  const totalQuestions = questions.length;
+  const progress = totalQuestions > 0 ? ((currentQuestionIndex + 1) / totalQuestions) * 100 : 0;
+
+  // Initialize attempt
+  useEffect(() => {
+    if (examId && !attemptId) {
+      startAttempt.mutateAsync(examId).then((attempt) => {
+        setAttemptId(attempt.id);
+      }).catch((err) => {
+        console.error('Failed to start attempt:', err);
+        toast.error('Không thể bắt đầu bài thi');
+        navigate('/dashboard');
+      });
+    }
+  }, [examId, attemptId]);
+
+  // Initialize timer
+  useEffect(() => {
+    if (exam) {
+      setTimeLeft(exam.duration_minutes * 60);
+    }
+  }, [exam]);
 
   // Format time display
   const formatTime = (seconds: number) => {
@@ -103,6 +98,8 @@ export function ExamTaking() {
 
   // Timer countdown
   useEffect(() => {
+    if (timeLeft <= 0 || isSubmitted) return;
+    
     const timer = setInterval(() => {
       setTimeLeft((prev) => {
         if (prev <= 1) {
@@ -115,11 +112,11 @@ export function ExamTaking() {
     }, 1000);
 
     return () => clearInterval(timer);
-  }, []);
+  }, [timeLeft, isSubmitted]);
 
   // Camera setup
   useEffect(() => {
-    if (mockExam.require_camera) {
+    if (exam?.require_camera) {
       navigator.mediaDevices
         .getUserMedia({ video: true })
         .then((stream) => {
@@ -130,25 +127,33 @@ export function ExamTaking() {
         })
         .catch(() => {
           setCameraError(true);
-          logViolation('camera_denied', 'Không cấp quyền camera');
+          if (attemptId) {
+            logViolation.mutate({
+              attemptId,
+              type: 'camera_denied',
+              details: 'Không cấp quyền camera',
+            });
+          }
         });
     }
 
     return () => {
       cameraStream?.getTracks().forEach((track) => track.stop());
     };
-  }, []);
+  }, [exam?.require_camera, attemptId]);
 
   // Anti-cheat: Tab visibility
   useEffect(() => {
+    if (!attemptId || isSubmitted) return;
+
     const handleVisibilityChange = () => {
       if (document.hidden) {
-        logViolation('tab_switch', 'Chuyển sang tab khác');
+        handleViolation('tab_switch', 'Chuyển sang tab khác');
       }
     };
 
     const handleBlur = () => {
-      logViolation('window_blur', 'Rời khỏi cửa sổ trình duyệt');
+      handleViolation('window_blur', 'Rời khỏi cửa sổ trình duyệt');
     };
 
     document.addEventListener('visibilitychange', handleVisibilityChange);
@@ -158,15 +163,23 @@ export function ExamTaking() {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('blur', handleBlur);
     };
-  }, [violations]);
+  }, [attemptId, violations, isSubmitted]);
 
-  const logViolation = useCallback((type: string, message: string) => {
+  const handleViolation = useCallback((type: 'tab_switch' | 'window_blur' | 'camera_off' | 'camera_denied' | 'browser_minimize', message: string) => {
+    if (!attemptId || isSubmitted) return;
+    
     setViolations((prev) => {
       const newCount = prev + 1;
       setViolationMessage(message);
       setShowViolationAlert(true);
 
-      if (newCount >= mockExam.max_violations) {
+      logViolation.mutate({
+        attemptId,
+        type,
+        details: message,
+      });
+
+      if (exam && newCount >= exam.max_violations) {
         toast.error('Bạn đã vi phạm quá nhiều lần!', {
           description: 'Bài làm sẽ được nộp tự động.',
         });
@@ -175,13 +188,16 @@ export function ExamTaking() {
 
       return newCount;
     });
-  }, []);
+  }, [attemptId, exam, isSubmitted]);
 
   const getCurrentAnswer = () => {
+    if (!currentQuestion) return undefined;
     return answers.find((a) => a.questionId === currentQuestion.id);
   };
 
-  const updateAnswer = (update: Partial<Answer>) => {
+  const updateAnswer = async (update: Partial<Answer>) => {
+    if (!currentQuestion || !attemptId) return;
+    
     setAnswers((prev) => {
       const existing = prev.find((a) => a.questionId === currentQuestion.id);
       if (existing) {
@@ -191,12 +207,20 @@ export function ExamTaking() {
       }
       return [...prev, { questionId: currentQuestion.id, ...update }];
     });
+
+    // Save to database
+    saveAnswer.mutate({
+      attemptId,
+      questionId: currentQuestion.id,
+      selectedOptions: update.selectedOptions,
+      essayAnswer: update.essayAnswer,
+    });
   };
 
   const handleOptionSelect = (optionId: string) => {
     const current = getCurrentAnswer();
     
-    if (currentQuestion.type === 'multiple_choice_single') {
+    if (currentQuestion?.type === 'multiple_choice_single') {
       updateAnswer({ selectedOptions: [optionId] });
     } else {
       const currentSelected = current?.selectedOptions || [];
@@ -207,14 +231,69 @@ export function ExamTaking() {
     }
   };
 
-  const handleSubmit = () => {
-    toast.success('Đã nộp bài thành công!', {
-      description: 'Kết quả sẽ được thông báo sau.',
-    });
-    // TODO: Submit to backend
+  const handleSubmit = async () => {
+    if (!attemptId || isSubmitted) return;
+    
+    try {
+      const result = await submitExam.mutateAsync(attemptId);
+      setIsSubmitted(true);
+      setExamResult(result);
+      
+      // Stop camera
+      cameraStream?.getTracks().forEach((track) => track.stop());
+    } catch (error) {
+      console.error('Submit failed:', error);
+      toast.error('Lỗi khi nộp bài');
+    }
   };
 
   const isTimeWarning = timeLeft <= 300; // 5 minutes warning
+
+  if (examLoading || !exam) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <Loader2 className="w-8 h-8 animate-spin text-primary" />
+      </div>
+    );
+  }
+
+  // Show results after submission
+  if (isSubmitted && examResult) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center p-4">
+        <Card className="w-full max-w-lg border-0 shadow-medium">
+          <CardContent className="pt-8 pb-8 text-center">
+            <div className="w-20 h-20 rounded-full bg-success/10 flex items-center justify-center mx-auto mb-6">
+              <CheckCircle className="w-10 h-10 text-success" />
+            </div>
+            <h1 className="text-3xl font-display font-bold mb-2">Đã nộp bài thành công!</h1>
+            <p className="text-muted-foreground mb-8">{exam.title}</p>
+            
+            <div className="p-6 rounded-xl bg-accent mb-6">
+              <p className="text-muted-foreground mb-2">Điểm số của bạn</p>
+              <p className="text-5xl font-display font-bold text-primary">
+                {examResult.totalScore}/{examResult.maxScore}
+              </p>
+              <p className="text-lg text-muted-foreground mt-2">
+                {examResult.percentage}%
+              </p>
+            </div>
+
+            {violations > 0 && (
+              <div className="p-4 rounded-lg bg-warning/10 text-warning text-sm mb-6">
+                <AlertTriangle className="w-4 h-4 inline mr-2" />
+                Số lần vi phạm: {violations}
+              </div>
+            )}
+
+            <Button onClick={() => navigate('/dashboard')} size="lg" className="w-full">
+              Quay về trang chủ
+            </Button>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-background">
@@ -223,7 +302,7 @@ export function ExamTaking() {
         <div className="container flex items-center justify-between h-16">
           <div className="flex items-center gap-4">
             <h1 className="font-display font-bold text-lg truncate max-w-md">
-              {mockExam.title}
+              {exam.title}
             </h1>
           </div>
 
@@ -232,29 +311,37 @@ export function ExamTaking() {
             <div className="flex items-center gap-2">
               <AlertTriangle className={`w-5 h-5 ${violations > 0 ? 'text-warning' : 'text-muted-foreground'}`} />
               <span className={`font-medium ${violations > 0 ? 'text-warning' : ''}`}>
-                {violations}/{mockExam.max_violations}
+                {violations}/{exam.max_violations}
               </span>
             </div>
 
             {/* Camera Status */}
-            <div className="flex items-center gap-2">
-              <Camera className={`w-5 h-5 ${cameraError ? 'text-destructive' : 'text-success'}`} />
-              <span className="text-sm">
-                {cameraError ? 'Lỗi' : 'Đang ghi'}
-              </span>
-            </div>
+            {exam.require_camera && (
+              <div className="flex items-center gap-2">
+                <Camera className={`w-5 h-5 ${cameraError ? 'text-destructive' : 'text-success'}`} />
+                <span className="text-sm">
+                  {cameraError ? 'Lỗi' : 'Đang ghi'}
+                </span>
+              </div>
+            )}
 
             {/* Timer */}
             <div className={`flex items-center gap-2 px-4 py-2 rounded-lg ${
               isTimeWarning ? 'bg-destructive/10 text-destructive animate-pulse' : 'bg-accent'
             }`}>
               <Clock className="w-5 h-5" />
-              <span className="exam-timer">{formatTime(timeLeft)}</span>
+              <span className="exam-timer font-mono">{formatTime(timeLeft)}</span>
             </div>
 
-            <Button onClick={handleSubmit} className="gap-2">
-              <Send className="w-4 h-4" />
-              Nộp bài
+            <Button onClick={handleSubmit} className="gap-2" disabled={submitExam.isPending}>
+              {submitExam.isPending ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <>
+                  <Send className="w-4 h-4" />
+                  Nộp bài
+                </>
+              )}
             </Button>
           </div>
         </div>
@@ -267,111 +354,113 @@ export function ExamTaking() {
         <div className="grid lg:grid-cols-4 gap-6">
           {/* Main Question Area */}
           <div className="lg:col-span-3">
-            <Card className="border-0 shadow-medium">
-              <CardContent className="p-8">
-                <div className="flex items-center justify-between mb-6">
-                  <Badge variant="secondary" className="text-sm">
-                    Câu {currentQuestionIndex + 1} / {totalQuestions}
-                  </Badge>
-                  <Badge variant="outline">{currentQuestion.points} điểm</Badge>
-                </div>
-
-                <h2 className="text-xl font-medium mb-8">{currentQuestion.content}</h2>
-
-                {/* Multiple Choice Single */}
-                {currentQuestion.type === 'multiple_choice_single' && (
-                  <RadioGroup
-                    value={getCurrentAnswer()?.selectedOptions?.[0] || ''}
-                    onValueChange={(value) => handleOptionSelect(value)}
-                    className="space-y-3"
-                  >
-                    {currentQuestion.options?.map((option) => (
-                      <Label
-                        key={option.id}
-                        htmlFor={`option-${option.id}`}
-                        className={`flex items-center gap-4 p-4 rounded-lg border-2 cursor-pointer transition-all ${
-                          getCurrentAnswer()?.selectedOptions?.includes(option.id)
-                            ? 'border-primary bg-primary/5'
-                            : 'border-border hover:border-primary/50'
-                        }`}
-                      >
-                        <RadioGroupItem value={option.id} id={`option-${option.id}`} />
-                        <span className="font-medium">{option.id.toUpperCase()}.</span>
-                        <span>{option.text}</span>
-                      </Label>
-                    ))}
-                  </RadioGroup>
-                )}
-
-                {/* Multiple Choice Multiple */}
-                {currentQuestion.type === 'multiple_choice_multiple' && (
-                  <div className="space-y-3">
-                    {currentQuestion.options?.map((option) => (
-                      <Label
-                        key={option.id}
-                        htmlFor={`option-${option.id}`}
-                        className={`flex items-center gap-4 p-4 rounded-lg border-2 cursor-pointer transition-all ${
-                          getCurrentAnswer()?.selectedOptions?.includes(option.id)
-                            ? 'border-primary bg-primary/5'
-                            : 'border-border hover:border-primary/50'
-                        }`}
-                      >
-                        <Checkbox
-                          id={`option-${option.id}`}
-                          checked={getCurrentAnswer()?.selectedOptions?.includes(option.id)}
-                          onCheckedChange={() => handleOptionSelect(option.id)}
-                        />
-                        <span className="font-medium">{option.id.toUpperCase()}.</span>
-                        <span>{option.text}</span>
-                      </Label>
-                    ))}
-                    <p className="text-sm text-muted-foreground mt-4">
-                      Có thể chọn nhiều đáp án
-                    </p>
+            {currentQuestion && (
+              <Card className="border-0 shadow-medium">
+                <CardContent className="p-8">
+                  <div className="flex items-center justify-between mb-6">
+                    <Badge variant="secondary" className="text-sm">
+                      Câu {currentQuestionIndex + 1} / {totalQuestions}
+                    </Badge>
+                    <Badge variant="outline">{currentQuestion.points} điểm</Badge>
                   </div>
-                )}
 
-                {/* Essay */}
-                {currentQuestion.type === 'essay' && (
-                  <Textarea
-                    placeholder="Nhập câu trả lời của bạn..."
-                    value={getCurrentAnswer()?.essayAnswer || ''}
-                    onChange={(e) => updateAnswer({ essayAnswer: e.target.value })}
-                    rows={10}
-                    className="resize-none"
-                  />
-                )}
+                  <h2 className="text-xl font-medium mb-8">{currentQuestion.content}</h2>
 
-                {/* Navigation */}
-                <div className="flex items-center justify-between mt-8 pt-6 border-t">
-                  <Button
-                    variant="outline"
-                    onClick={() => setCurrentQuestionIndex((prev) => Math.max(0, prev - 1))}
-                    disabled={currentQuestionIndex === 0}
-                    className="gap-2"
-                  >
-                    <ChevronLeft className="w-4 h-4" />
-                    Câu trước
-                  </Button>
-                  <Button
-                    onClick={() =>
-                      setCurrentQuestionIndex((prev) => Math.min(totalQuestions - 1, prev + 1))
-                    }
-                    disabled={currentQuestionIndex === totalQuestions - 1}
-                    className="gap-2"
-                  >
-                    Câu sau
-                    <ChevronRight className="w-4 h-4" />
-                  </Button>
-                </div>
-              </CardContent>
-            </Card>
+                  {/* Multiple Choice Single */}
+                  {currentQuestion.type === 'multiple_choice_single' && currentQuestion.options && (
+                    <RadioGroup
+                      value={getCurrentAnswer()?.selectedOptions?.[0] || ''}
+                      onValueChange={(value) => handleOptionSelect(value)}
+                      className="space-y-3"
+                    >
+                      {(currentQuestion.options as QuestionOption[]).map((option) => (
+                        <Label
+                          key={option.id}
+                          htmlFor={`option-${option.id}`}
+                          className={`flex items-center gap-4 p-4 rounded-lg border-2 cursor-pointer transition-all ${
+                            getCurrentAnswer()?.selectedOptions?.includes(option.id)
+                              ? 'border-primary bg-primary/5'
+                              : 'border-border hover:border-primary/50'
+                          }`}
+                        >
+                          <RadioGroupItem value={option.id} id={`option-${option.id}`} />
+                          <span className="font-medium">{option.id.toUpperCase()}.</span>
+                          <span>{option.text}</span>
+                        </Label>
+                      ))}
+                    </RadioGroup>
+                  )}
+
+                  {/* Multiple Choice Multiple */}
+                  {currentQuestion.type === 'multiple_choice_multiple' && currentQuestion.options && (
+                    <div className="space-y-3">
+                      {(currentQuestion.options as QuestionOption[]).map((option) => (
+                        <Label
+                          key={option.id}
+                          htmlFor={`option-${option.id}`}
+                          className={`flex items-center gap-4 p-4 rounded-lg border-2 cursor-pointer transition-all ${
+                            getCurrentAnswer()?.selectedOptions?.includes(option.id)
+                              ? 'border-primary bg-primary/5'
+                              : 'border-border hover:border-primary/50'
+                          }`}
+                        >
+                          <Checkbox
+                            id={`option-${option.id}`}
+                            checked={getCurrentAnswer()?.selectedOptions?.includes(option.id)}
+                            onCheckedChange={() => handleOptionSelect(option.id)}
+                          />
+                          <span className="font-medium">{option.id.toUpperCase()}.</span>
+                          <span>{option.text}</span>
+                        </Label>
+                      ))}
+                      <p className="text-sm text-muted-foreground mt-4">
+                        Có thể chọn nhiều đáp án
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Essay */}
+                  {currentQuestion.type === 'essay' && (
+                    <Textarea
+                      placeholder="Nhập câu trả lời của bạn..."
+                      value={getCurrentAnswer()?.essayAnswer || ''}
+                      onChange={(e) => updateAnswer({ essayAnswer: e.target.value })}
+                      rows={10}
+                      className="resize-none"
+                    />
+                  )}
+
+                  {/* Navigation */}
+                  <div className="flex items-center justify-between mt-8 pt-6 border-t">
+                    <Button
+                      variant="outline"
+                      onClick={() => setCurrentQuestionIndex((prev) => Math.max(0, prev - 1))}
+                      disabled={currentQuestionIndex === 0}
+                      className="gap-2"
+                    >
+                      <ChevronLeft className="w-4 h-4" />
+                      Câu trước
+                    </Button>
+                    <Button
+                      onClick={() =>
+                        setCurrentQuestionIndex((prev) => Math.min(totalQuestions - 1, prev + 1))
+                      }
+                      disabled={currentQuestionIndex === totalQuestions - 1}
+                      className="gap-2"
+                    >
+                      Câu sau
+                      <ChevronRight className="w-4 h-4" />
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
           </div>
 
           {/* Sidebar */}
           <div className="space-y-4">
             {/* Camera Preview */}
-            {mockExam.require_camera && (
+            {exam.require_camera && (
               <Card className="border-0 shadow-medium overflow-hidden">
                 <div className="aspect-video bg-muted relative">
                   {cameraError ? (
@@ -400,7 +489,7 @@ export function ExamTaking() {
               <CardContent className="p-4">
                 <h3 className="font-semibold mb-4">Danh sách câu hỏi</h3>
                 <div className="grid grid-cols-5 gap-2">
-                  {mockExam.questions.map((q, index) => {
+                  {questions.map((q, index) => {
                     const hasAnswer = answers.some((a) => a.questionId === q.id);
                     return (
                       <Button
@@ -442,7 +531,7 @@ export function ExamTaking() {
             <AlertDialogDescription>
               {violationMessage}
               <br /><br />
-              <strong>Số lần vi phạm: {violations}/{mockExam.max_violations}</strong>
+              <strong>Số lần vi phạm: {violations}/{exam.max_violations}</strong>
               <br />
               Nếu bạn tiếp tục vi phạm, bài làm có thể bị nộp tự động hoặc hủy kết quả.
             </AlertDialogDescription>
